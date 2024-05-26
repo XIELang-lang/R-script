@@ -1,0 +1,79 @@
+## 下载对应的包
+conda install -c bioconda sra-tools
+conda install fastp
+conda install fastqc
+conda install salmon
+
+
+## 构建salmon索引
+# 从ENSEMBL下载基因组和基因注释文件
+mkdir -p genome
+cd genome
+wget ftp://ftp.ensembl.org/pub/release-100/gtf/homo_sapiens/Homo_sapiens.GRCh38.100.gtf.gz -O GRCh38.gtf.gz
+wget ftp://ftp.ensembl.org/pub/release-100/fasta/homo_sapiens/dna/Homo_sapiens.GRCh38.dna.primary_assembly.fa.gz -O GRCh38.fa.gz
+
+# 解压基因组及注释文件
+gunzip -c GRCh38.fa.gz >GRCh38.fa
+gunzip -c GRCh38.gtf.gz >GRCh38.gtf
+
+# 下载、安装gffread 
+# git clone https://github.com/gpertea/gffread
+# cd gffread
+# make release
+ 
+# 从.gtf文件获得cDNA序列以及处理   
+gffread ./genome/GRCh38.gtf -g ./genome/GRCh38.fa -w ./genome/GRCh38.transcript.fa.tmp
+grep '>' ./genome/GRCh38.transcript.fa.tmp | head
+cut -f 1 -d ' ' ./genome/GRCh38.transcript.fa.tmp >./genome/GRCh38.transcript.fa  # 去掉空格后面的字符串，保证cDNA文件中fasta序列的名字简洁，不然后续会出错
+
+# 获取所有基因组序列的名字存储于decoy中
+grep '^>' ./genome/GRCh38.fa | cut -d ' ' -f 1 | sed 's/^>//g' >./genome/GRCh38.decoys.txt
+
+# 合并cDNA和基因组序列，注意：cDNA在前，基因组在后
+cat ./genome/GRCh38.transcript.fa ./genome/GRCh38.fa >./genome/GRCh38_trans_genome.fa
+
+# 构建索引 （更慢，结果会更准）
+salmon index -t ./genome/GRCh38_trans_genome.fa -d ./genome/GRCh38.decoys.txt -i ./genome/GRCh38.salmon_sa_index
+
+
+## 编写bash脚本进行后续分析
+vim salmon.sh
+#!/bin/bash
+for i in $(cat SRR_Acc_List_SRP092408_1.txt | awk 'NR==1,NR==9{print}')
+do
+prefetch $i
+fastq-dump --split-3 --gzip ./${i}/${i}.sra
+mv ./${i}_1.fastq.gz ./${i}
+mv ./${i}_2.fastq.gz ./${i}
+./fastp -i ./${i}/${i}_1.fastq.gz -o ./${i}/${i}_1_clean_data.fastq.gz -I ./${i}/${i}_2.fastq.gz -O ./${i}/${i}_2_clean_data.fastq.gz -Q --thread=5 --length_required=50 --n_base_limit=6 --compression=6
+fastqc -t 12 -o ./${i} ./${i}/${i}_1_clean_data.fastq.gz ./${i}/${i}_2_clean_data.fastq.gz
+mkdir -p ${i}
+salmon quant --gcBias -l A -1 ./${i}/${i}_1_clean_data.fastq.gz -2 ./${i}/${i}_2_clean_data.fastq.gz -i genome/GRCh38.salmon_sa_index -g genome/GRCh38.gtf -o ./${i}/${i}.salmon.count -p 12
+done
+
+chmod u+x salmon.sh ; bash ./salmon.sh &
+
+
+## 批量移动文件
+vim transfer.sh
+#!/bin/bash
+mkdir -p fastqc_results
+for i in $(ls ./salmon_quant_sf)
+do
+mv ./salmon_quant_sf/${i}/${i}.salmon.count ./salmon_quant_sf
+mv ./salmon_quant_sf/${i}/${i}_1_clean_data_fastqc.html ./fastqc_results
+mv ./salmon_quant_sf/${i}/${i}_2_clean_data_fastqc.html ./fastqc_results
+rm -rf ./salmon_quant_sf/${i}
+done
+
+chmod u+x transfer.sh ; bash ./transfer.sh
+
+
+
+
+
+
+
+
+
+
